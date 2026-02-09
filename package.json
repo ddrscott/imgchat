@@ -1,0 +1,30 @@
+{
+  "name": "imgchat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "alias": {
+    "hono/jsx/jsx-runtime": "hono/dist/jsx/jsx-runtime.js",
+    "hono/jsx/jsx-dev-runtime": "hono/dist/jsx/jsx-dev-runtime.js",
+    "hono/jsx/dom": "hono/dist/jsx/dom/index.js"
+  },
+  "scripts": {
+    "dev": "npm run build:client && wrangler dev",
+    "build:client": "parcel build src/client/main.css src/client/app.tsx --dist-dir public/dist --no-source-maps",
+    "watch:client": "parcel watch src/client/main.css src/client/app.tsx --dist-dir public/dist --no-source-maps",
+    "deploy": "npm run build:client && wrangler deploy",
+    "db:migrate": "wrangler d1 execute imgchat-db --local --file=./schema/migrations.sql",
+    "db:migrate:prod": "wrangler d1 execute imgchat-db --remote --file=./schema/migrations.sql"
+  },
+  "dependencies": {
+    "hono": "^4.6.0",
+    "nanoid": "^5.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "@types/node": "^22.0.0",
+    "parcel": "^2.16.1",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.51.0"
+  }
+}
