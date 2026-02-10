@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'hono/jsx/dom';
 import type { Session, Message, DebugInfo } from '../hooks/useSession';
 import type { Settings } from '../hooks/useSettings';
+import { MODELS, getModelInfo } from '../models';
 
 interface ChatPanelProps {
   session: Session | null;
@@ -18,6 +19,7 @@ interface ChatPanelProps {
   onRetry: (messageId: string) => void;
   onDismiss: (messageId: string) => void;
   onDelete: (messageId: string) => void;
+  onUpload: (file: File) => void;
 }
 
 // Aspect ratio presets
@@ -31,6 +33,24 @@ const ASPECT_RATIOS = [
   { label: '9:16', width: 720, height: 1280 },
   { label: '21:9', width: 1280, height: 548 },
 ];
+
+// Find matching or closest aspect ratio label
+function getAspectLabel(width: number, height: number): string {
+  const match = ASPECT_RATIOS.find(r => r.width === width && r.height === height);
+  if (match) return match.label;
+  // Calculate ratio and find closest
+  const ratio = width / height;
+  let closest = ASPECT_RATIOS[0];
+  let closestDiff = Math.abs(ratio - closest.width / closest.height);
+  for (const r of ASPECT_RATIOS) {
+    const diff = Math.abs(ratio - r.width / r.height);
+    if (diff < closestDiff) {
+      closest = r;
+      closestDiff = diff;
+    }
+  }
+  return `~${closest.label}`;
+}
 
 // Branch/fork icon SVG
 const BranchIcon = () => (
@@ -83,6 +103,38 @@ const CopyIcon = () => (
   </svg>
 );
 
+// Radio tower icon for Radio TTS models (Lucide)
+const RadioIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" class="provider-icon">
+    <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9" />
+    <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5" />
+    <circle cx="12" cy="12" r="2" />
+    <path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5" />
+    <path d="M19.1 4.9C23 8.8 23 15.1 19.1 19" />
+  </svg>
+);
+
+// Cloud icon for Cloudflare models (Lucide)
+const CloudIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" class="provider-icon">
+    <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+  </svg>
+);
+
+// Provider icon component
+const ProviderIcon = ({ type }: { type: 'radio' | 'cloud' }) => {
+  return type === 'cloud' ? <CloudIcon /> : <RadioIcon />;
+};
+
+// Upload icon SVG
+const UploadIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="17 8 12 3 7 8" />
+    <line x1="12" y1="3" x2="12" y2="15" />
+  </svg>
+);
+
 // Spinner component
 const Spinner = () => (
   <div class="spinner" />
@@ -104,6 +156,7 @@ export function ChatPanel({
   onRetry,
   onDismiss,
   onDelete,
+  onUpload,
 }: ChatPanelProps) {
   const [prompt, setPrompt] = useState('');
   const [showDebug, setShowDebug] = useState<string | null>(null);
@@ -115,7 +168,9 @@ export function ChatPanel({
   const [lightboxZoom, setLightboxZoom] = useState(1);
   const [lightboxPan, setLightboxPan] = useState({ x: 0, y: 0 });
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Mode is derived from selection state
   const isEditMode = selectedImages.length > 0;
@@ -193,13 +248,6 @@ export function ChatPanel({
     });
   };
 
-  // Build a map of x_url to image_path for selected preview
-  const xUrlToPath = new Map<string, string>();
-  messages.forEach(msg => {
-    if (msg.x_url && msg.image_path) {
-      xUrlToPath.set(msg.x_url, msg.image_path);
-    }
-  });
 
   if (!session) {
     return (
@@ -220,8 +268,32 @@ export function ChatPanel({
         </h2>
       </div>
 
-      <div class="chat-messages">
-        {messages.length === 0 && !generating && (
+      <div
+        class={`chat-messages ${isDragging ? 'drag-over' : ''}`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setIsDragging(true);
+        }}
+        onDragLeave={(e) => {
+          e.preventDefault();
+          setIsDragging(false);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          setIsDragging(false);
+          const file = e.dataTransfer?.files?.[0];
+          if (file && file.type.match(/^image\/(png|jpeg|webp)$/)) {
+            onUpload(file);
+          }
+        }}
+      >
+        {isDragging && (
+          <div class="drop-overlay">
+            <div class="drop-icon"><UploadIcon /></div>
+            <p>Drop image to upload</p>
+          </div>
+        )}
+        {messages.length === 0 && !generating && !isDragging && (
           <div class="empty-state">
             <div class="empty-icon">🎨</div>
             <p>Describe an image to get started</p>
@@ -231,23 +303,25 @@ export function ChatPanel({
           const isPending = msg.status === 'pending';
           const isFailed = msg.status === 'failed';
           const isSuccess = !isPending && !isFailed;
-          const isSelected = msg.x_url && selectedImages.includes(msg.x_url);
+          const isSelected = msg.image_path && selectedImages.includes(msg.image_path);
+          const isUploaded = msg.prompt.startsWith('[Uploaded');
+          const messageType = isUploaded ? 'uploaded' : (msg.is_edit ? 'edit' : 'new');
 
           return (
             <div
               key={msg.id}
-              class={`message-card ${msg.is_edit ? 'edit' : 'new'} ${isSelected ? 'selected' : ''} ${isPending ? 'pending' : ''} ${isFailed ? 'failed' : ''}`}
+              class={`message-card ${messageType} ${isSelected ? 'selected' : ''} ${isPending ? 'pending' : ''} ${isFailed ? 'failed' : ''}`}
             >
               {/* Image container with inset checkbox */}
               <div class="message-image-container">
                 {/* Checkbox overlaid on image */}
-                {msg.x_url && isSuccess && (
+                {msg.image_path && isSuccess && (
                   <label class="message-checkbox-label">
                     <input
                       type="checkbox"
                       class="message-checkbox"
                       checked={isSelected}
-                      onChange={() => onToggleSelect(msg.x_url!)}
+                      onChange={() => onToggleSelect(msg.image_path!)}
                     />
                     <span class="checkbox-visual" />
                   </label>
@@ -290,7 +364,7 @@ export function ChatPanel({
 
               {/* Meta row with inline action buttons */}
               <div class="message-meta">
-                <span class="message-type">{msg.is_edit ? 'edit' : 'new'}</span>
+                <span class="message-type">{messageType}</span>
                 {isPending && <span>generating...</span>}
                 {isFailed && <span class="error-label">failed</span>}
                 {msg.generation_time_ms && isSuccess && (
@@ -299,6 +373,16 @@ export function ChatPanel({
 
                 {/* Action buttons inline */}
                 <div class="message-actions">
+                  {/* Pending: show dismiss to cancel stuck generations */}
+                  {isPending && (
+                    <button
+                      class="dismiss-btn"
+                      onClick={() => onDismiss(msg.id)}
+                      title="Cancel"
+                    >
+                      <DismissIcon />
+                    </button>
+                  )}
                   {/* Failed: show retry and dismiss */}
                   {isFailed && (
                     <>
@@ -385,7 +469,7 @@ export function ChatPanel({
                 <label>Aspect</label>
                 <select
                   value={`${settings.width}x${settings.height}`}
-                  onChange={(e) => {
+                  onInput={(e) => {
                     const ratio = ASPECT_RATIOS.find(r => `${r.width}x${r.height}` === (e.target as HTMLSelectElement).value);
                     if (ratio) onUpdateSettings({ width: ratio.width, height: ratio.height });
                   }}
@@ -395,16 +479,28 @@ export function ChatPanel({
                   ))}
                 </select>
               </div>
-              <div class="gen-setting">
+              <div class="gen-setting model-setting">
                 <label>Model</label>
-                <select
-                  value={settings.model}
-                  onChange={(e) => onUpdateSettings({ model: (e.target as HTMLSelectElement).value as Settings['model'] })}
-                >
-                  <option value="flux2klein">flux2klein</option>
-                  <option value="flux2klein-9b">flux2klein-9b</option>
-                  <option value="zimage-turbo">zimage-turbo</option>
-                </select>
+                <div class="model-select-wrapper">
+                  <span class="model-provider-icon">
+                    <ProviderIcon type={getModelInfo(settings.model)?.providerIcon || 'radio'} />
+                  </span>
+                  <select
+                    value={settings.model}
+                    onInput={(e) => onUpdateSettings({ model: (e.target as HTMLSelectElement).value as Settings['model'] })}
+                  >
+                    <optgroup label="☁️ Cloudflare Workers AI">
+                      {MODELS.filter(m => m.provider === 'cloudflare').map(m => (
+                        <option key={m.id} value={m.id}>{m.name}</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="📡 Radio TTS (API Key)">
+                      {MODELS.filter(m => m.provider === 'radio').map(m => (
+                        <option key={m.id} value={m.id}>{m.name}</option>
+                      ))}
+                    </optgroup>
+                  </select>
+                </div>
               </div>
               <div class="gen-setting">
                 <label>Steps</label>
@@ -413,7 +509,7 @@ export function ChatPanel({
                   min="1"
                   max="50"
                   value={settings.steps}
-                  onChange={(e) => onUpdateSettings({ steps: parseInt((e.target as HTMLInputElement).value) || 4 })}
+                  onInput={(e) => onUpdateSettings({ steps: parseInt((e.target as HTMLInputElement).value) || 4 })}
                 />
               </div>
               <div class="gen-setting">
@@ -424,7 +520,7 @@ export function ChatPanel({
                   max="20"
                   step="0.5"
                   value={settings.guidance}
-                  onChange={(e) => onUpdateSettings({ guidance: parseFloat((e.target as HTMLInputElement).value) || 1.0 })}
+                  onInput={(e) => onUpdateSettings({ guidance: parseFloat((e.target as HTMLInputElement).value) || 1.0 })}
                 />
               </div>
             </div>
@@ -433,7 +529,7 @@ export function ChatPanel({
               <input
                 type="text"
                 value={settings.negativePrompt}
-                onChange={(e) => onUpdateSettings({ negativePrompt: (e.target as HTMLInputElement).value })}
+                onInput={(e) => onUpdateSettings({ negativePrompt: (e.target as HTMLInputElement).value })}
                 placeholder="Things to avoid..."
               />
             </div>
@@ -444,22 +540,19 @@ export function ChatPanel({
           {selectedImages.length > 0 && (
             <div class="selected-preview">
               <span class="selected-count">{selectedImages.length} selected:</span>
-              {selectedImages.map((xUrl) => {
-                const imagePath = xUrlToPath.get(xUrl);
-                return imagePath ? (
-                  <div class="selected-preview-item" key={xUrl}>
-                    <img src={`/${imagePath}`} alt="Selected" loading="lazy" />
-                    <button
-                      type="button"
-                      class="remove-btn"
-                      onClick={() => onToggleSelect(xUrl)}
-                      title="Remove"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ) : null;
-              })}
+              {selectedImages.map((imagePath) => (
+                <div class="selected-preview-item" key={imagePath}>
+                  <img src={`/${imagePath}`} alt="Selected" loading="lazy" />
+                  <button
+                    type="button"
+                    class="remove-btn"
+                    onClick={() => onToggleSelect(imagePath)}
+                    title="Remove"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
               <button type="button" class="clear-selection" onClick={onClearSelection}>
                 clear all
               </button>
@@ -474,13 +567,34 @@ export function ChatPanel({
             >
               <span class="chevron">{showGenSettings ? '▼' : '▲'}</span>
             </button>
+            <button
+              type="button"
+              class="upload-btn"
+              onClick={() => fileInputRef.current?.click()}
+              title="Upload image"
+              disabled={generating}
+            >
+              <UploadIcon />
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const file = (e.target as HTMLInputElement).files?.[0];
+                if (file) {
+                  onUpload(file);
+                  (e.target as HTMLInputElement).value = '';
+                }
+              }}
+            />
             {showGenSettings ? (
               <textarea
                 value={prompt}
                 onInput={(e) => setPrompt((e.target as HTMLTextAreaElement).value)}
                 onKeyDown={handleKeyDown}
                 placeholder={isEditMode ? 'Describe changes...' : 'Describe an image...'}
-                disabled={generating}
                 rows={4}
               />
             ) : (
@@ -490,14 +604,19 @@ export function ChatPanel({
                 onInput={(e) => setPrompt((e.target as HTMLInputElement).value)}
                 onKeyDown={handleKeyDown}
                 placeholder={isEditMode ? 'Describe changes...' : 'Describe an image...'}
-                disabled={generating}
               />
             )}
-            <button type="submit" disabled={generating || !prompt.trim()}>
-              {generating ? '...' : (isEditMode ? 'Edit' : 'New')}
+            <button type="submit" disabled={!prompt.trim()}>
+              {isEditMode ? 'Edit' : 'New'}
             </button>
           </div>
-          <div class="input-hint">Ctrl+Enter to send</div>
+          <div class="input-hint">
+            <span class="settings-preview" onClick={() => setShowGenSettings(true)} title="Click to change">
+              {getModelInfo(settings.model)?.name || settings.model} · {getAspectLabel(settings.width, settings.height)}
+            </span>
+            <span class="hint-sep">·</span>
+            <span>Ctrl+Enter to send</span>
+          </div>
         </form>
       </div>
 

@@ -20,6 +20,10 @@ database_id = "780e8979-75a6-407b-b8fb-d63b5041eb13"
 binding = "IMAGES"
 bucket_name = "imgchat-images"
 
+# Workers AI for Cloudflare image models
+[ai]
+binding = "AI"
+
 [vars]
 ENVIRONMENT = "production"
 

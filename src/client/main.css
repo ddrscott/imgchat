@@ -486,6 +486,10 @@ body {
   color: var(--success);
 }
 
+.message-card.uploaded .message-type {
+  color: var(--text-secondary);
+}
+
 /* Action buttons inline in meta row */
 .message-actions {
   display: flex;
@@ -499,8 +503,9 @@ body {
   opacity: 1;
 }
 
-/* Always show actions on failed messages */
-.message-card.failed .message-actions {
+/* Always show actions on failed and pending messages */
+.message-card.failed .message-actions,
+.message-card.pending .message-actions {
   opacity: 1;
 }
 
@@ -851,6 +856,38 @@ body {
   width: 100%;
 }
 
+/* Model Select with Provider Icon */
+.model-select-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  position: relative;
+}
+
+.model-provider-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.provider-icon {
+  width: 16px;
+  height: 16px;
+  stroke: var(--text-secondary);
+}
+
+.model-select-wrapper select {
+  flex: 1;
+  min-width: 0;
+}
+
+.gen-setting.model-setting {
+  min-width: 140px;
+}
+
 /* Settings Toggle Button */
 .settings-toggle {
   background: none;
@@ -871,6 +908,74 @@ body {
 
 .settings-toggle .chevron {
   font-size: 0.75rem;
+}
+
+/* Upload Button */
+.upload-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s;
+}
+
+.upload-btn:hover {
+  color: var(--accent);
+}
+
+.upload-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.upload-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* Drag & Drop Overlay */
+.chat-messages.drag-over {
+  position: relative;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(59, 130, 246, 0.15);
+  border: 3px dashed var(--accent);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.drop-overlay .drop-icon {
+  width: 64px;
+  height: 64px;
+  background: var(--accent);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.drop-overlay .drop-icon svg {
+  width: 32px;
+  height: 32px;
+  stroke: white;
+}
+
+.drop-overlay p {
+  color: var(--accent);
+  font-size: 1.1rem;
+  font-weight: 500;
 }
 
 /* Chat Input */
@@ -1017,6 +1122,23 @@ body {
   font-size: 0.75rem;
   color: var(--text-muted);
   text-align: right;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.settings-preview {
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.settings-preview:hover {
+  text-decoration: underline;
+}
+
+.hint-sep {
+  color: var(--text-muted);
 }
 
 /* Error Toast */

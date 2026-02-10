@@ -12,7 +12,7 @@
     "dev": "npm run build:client && wrangler dev",
     "build:client": "parcel build src/client/main.css src/client/app.tsx --dist-dir public/dist --no-source-maps",
     "watch:client": "parcel watch src/client/main.css src/client/app.tsx --dist-dir public/dist --no-source-maps",
-    "deploy": "npm run build:client && wrangler deploy",
+    "deploy": "npm run build:client && npm run db:migrate:prod && wrangler deploy",
     "db:migrate": "wrangler d1 execute imgchat-db --local --file=./schema/migrations.sql",
     "db:migrate:prod": "wrangler d1 execute imgchat-db --remote --file=./schema/migrations.sql"
   },

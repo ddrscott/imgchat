@@ -1,5 +1,6 @@
-import { useState, useCallback } from 'hono/jsx/dom';
+import { useState, useCallback, useEffect, useRef } from 'hono/jsx/dom';
 import type { Settings } from './useSettings';
+import { modelRequiresApiKey } from '../models';
 
 export interface Message {
   id: string;
@@ -49,8 +50,40 @@ interface SessionState {
   generating: boolean;
   generatingPrompt: string | null; // Prompt currently being generated
   error: string | null;
-  selectedImages: string[]; // Array of x_urls for multi-select editing
+  selectedImages: string[]; // Array of image_paths for multi-select editing
   debugInfo: Record<string, DebugInfo>; // Message ID -> debug info
+}
+
+// API response types
+interface GenerateResponse {
+  job: {
+    id: string;
+    status: string;
+    model: string;
+    provider: string;
+    prompt: string;
+  };
+  message: Message;
+}
+
+interface JobResponse {
+  job: {
+    id: string;
+    session_id: string;
+    message_id: string;
+    status: 'pending' | 'processing' | 'completed' | 'failed';
+    error_message?: string;
+  };
+  message?: Message;
+}
+
+interface PendingJob {
+  id: string;
+  message_id: string;
+  session_id: string;
+  prompt: string;
+  params: string;
+  status: string;
 }
 
 export function useSession(getSettings: () => Settings) {
@@ -70,7 +103,7 @@ export function useSession(getSettings: () => Settings) {
     try {
       const response = await fetch('/api/sessions');
       if (response.ok) {
-        const sessions = await response.json();
+        const sessions: Session[] = await response.json();
         setState(s => ({ ...s, sessions, loading: false, error: null }));
       } else {
         setState(s => ({ ...s, loading: false, error: 'Failed to fetch sessions' }));
@@ -88,7 +121,7 @@ export function useSession(getSettings: () => Settings) {
         body: JSON.stringify({ name: name || 'New Chat' }),
       });
       if (response.ok) {
-        const session = await response.json();
+        const session: Session = await response.json();
         setState(s => ({
           ...s,
           sessions: [{ ...session, messages: [] }, ...s.sessions],
@@ -102,20 +135,7 @@ export function useSession(getSettings: () => Settings) {
     return null;
   }, []);
 
-  const selectSession = useCallback(async (sessionId: string) => {
-    setState(s => ({ ...s, loading: true, selectedImages: [] })); // Clear selection when switching
-    try {
-      const response = await fetch(`/api/sessions/${sessionId}`);
-      if (response.ok) {
-        const session = await response.json();
-        setState(s => ({ ...s, currentSession: session, loading: false, error: null }));
-      } else {
-        setState(s => ({ ...s, loading: false, error: 'Failed to load session' }));
-      }
-    } catch (e) {
-      setState(s => ({ ...s, loading: false, error: 'Network error' }));
-    }
-  }, []);
+  // selectSession is defined after pollJob below
 
   const deleteSession = useCallback(async (sessionId: string) => {
     try {
@@ -132,9 +152,195 @@ export function useSession(getSettings: () => Settings) {
     }
   }, []);
 
+  // Track active polling intervals
+  const pollingRef = useRef<Map<string, number>>(new Map());
+
+  // Poll for job completion
+  const pollJob = useCallback((jobId: string, sessionId: string, params: Message['_params']) => {
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/jobs/${jobId}`);
+        if (!response.ok) {
+          // Job not found, stop polling
+          const intervalId = pollingRef.current?.get(jobId);
+          if (intervalId) {
+            clearInterval(intervalId);
+            pollingRef.current?.delete(jobId);
+          }
+          return;
+        }
+
+        const data: JobResponse = await response.json();
+        const { job, message } = data;
+
+        if (job.status === 'completed' && message) {
+          // Stop polling
+          const intervalId = pollingRef.current?.get(jobId);
+          if (intervalId) {
+            clearInterval(intervalId);
+            pollingRef.current?.delete(jobId);
+          }
+
+          // Update message with completed data
+          const stillGenerating = (pollingRef.current?.size || 0) > 0;
+          setState(s => ({
+            ...s,
+            generating: stillGenerating,
+            generatingPrompt: stillGenerating ? s.generatingPrompt : null,
+            selectedImages: message.image_path ? [message.image_path] : s.selectedImages,
+            debugInfo: {
+              ...s.debugInfo,
+              [message.id]: {
+                payload: params as Record<string, unknown>,
+                endpoint: `/api/sessions/${sessionId}/generate`,
+                timestamp: message.created_at,
+              },
+            },
+            currentSession: s.currentSession?.id === sessionId ? {
+              ...s.currentSession,
+              current_x_url: message.x_url,
+              messages: (s.currentSession.messages || []).map(m =>
+                m.id === jobId ? { ...message, status: 'success' as const, _params: params } : m
+              ),
+            } : s.currentSession,
+          }));
+
+          // Refresh session to get auto-generated title
+          try {
+            const sessionResponse = await fetch(`/api/sessions/${sessionId}`);
+            if (sessionResponse.ok) {
+              const updatedSession: Session = await sessionResponse.json();
+              setState(s => ({
+                ...s,
+                sessions: s.sessions.map(sess =>
+                  sess.id === sessionId ? { ...sess, name: updatedSession.name } : sess
+                ),
+                currentSession: s.currentSession?.id === sessionId
+                  ? { ...s.currentSession, name: updatedSession.name }
+                  : s.currentSession,
+              }));
+            }
+          } catch (e) {
+            // Non-critical, ignore errors
+          }
+        } else if (job.status === 'failed') {
+          // Stop polling
+          const intervalId = pollingRef.current?.get(jobId);
+          if (intervalId) {
+            clearInterval(intervalId);
+            pollingRef.current?.delete(jobId);
+          }
+
+          // Update message with failed status
+          const stillGenerating = (pollingRef.current?.size || 0) > 0;
+          setState(s => ({
+            ...s,
+            generating: stillGenerating,
+            generatingPrompt: stillGenerating ? s.generatingPrompt : null,
+            currentSession: s.currentSession?.id === sessionId ? {
+              ...s.currentSession,
+              messages: (s.currentSession.messages || []).map(m =>
+                m.id === jobId ? { ...m, status: 'failed' as const, error: job.error_message || 'Generation failed' } : m
+              ),
+            } : s.currentSession,
+          }));
+        }
+        // If still pending/processing, continue polling
+      } catch (e) {
+        console.error('Polling error:', e);
+      }
+    };
+
+    // Poll immediately, then every 2 seconds
+    poll();
+    const intervalId = setInterval(poll, 2000) as unknown as number;
+    pollingRef.current?.set(jobId, intervalId);
+
+    return () => {
+      clearInterval(intervalId);
+      pollingRef.current?.delete(jobId);
+    };
+  }, []);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      pollingRef.current?.forEach((intervalId) => clearInterval(intervalId));
+      pollingRef.current?.clear();
+    };
+  }, []);
+
+  // Select a session and load its messages + pending jobs
+  const selectSession = useCallback(async (sessionId: string) => {
+    // Stop any existing polling when switching sessions
+    pollingRef.current?.forEach((intervalId) => clearInterval(intervalId));
+    pollingRef.current?.clear();
+
+    setState(s => ({ ...s, loading: true, selectedImages: [], generating: false, generatingPrompt: null }));
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}`);
+      if (response.ok) {
+        const session: Session = await response.json();
+        setState(s => ({ ...s, currentSession: session, loading: false, error: null }));
+
+        // Check for pending jobs and resume polling
+        try {
+          const jobsResponse = await fetch(`/api/sessions/${sessionId}/jobs`);
+          if (jobsResponse.ok) {
+            const pendingJobs: PendingJob[] = await jobsResponse.json();
+            if (pendingJobs.length > 0) {
+              // Add pending messages to state and start polling
+              setState(s => {
+                const existingMsgIds = new Set((s.currentSession?.messages || []).map(m => m.id));
+                const newMessages: Message[] = pendingJobs
+                  .filter((job) => !existingMsgIds.has(job.message_id))
+                  .map((job) => {
+                    const params = JSON.parse(job.params);
+                    return {
+                      id: job.message_id,
+                      prompt: job.prompt,
+                      image_path: null,
+                      x_url: null,
+                      is_edit: params.images?.length > 0 ? 1 : 0,
+                      generation_time_ms: null,
+                      archived: 0,
+                      created_at: new Date().toISOString(),
+                      status: 'pending' as const,
+                      _params: params,
+                    };
+                  });
+
+                return {
+                  ...s,
+                  generating: newMessages.length > 0,
+                  generatingPrompt: newMessages[0]?.prompt || null,
+                  currentSession: s.currentSession ? {
+                    ...s.currentSession,
+                    messages: [...(s.currentSession.messages || []), ...newMessages],
+                  } : null,
+                };
+              });
+
+              // Start polling for each pending job
+              for (const job of pendingJobs) {
+                const params = JSON.parse(job.params);
+                pollJob(job.message_id, sessionId, params);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('Failed to check pending jobs:', e);
+        }
+      } else {
+        setState(s => ({ ...s, loading: false, error: 'Failed to load session' }));
+      }
+    } catch (e) {
+      setState(s => ({ ...s, loading: false, error: 'Network error' }));
+    }
+  }, [pollJob]);
+
   // Core generation logic - calls server-side API
   const executeGeneration = useCallback(async (
-    placeholderId: string,
     prompt: string,
     params: Message['_params'],
     isEdit: boolean,
@@ -160,60 +366,57 @@ export function useSession(getSettings: () => Settings) {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Generation failed' }));
+        const errorData = await response.json().catch(() => ({ error: 'Generation failed' })) as { error?: string };
         throw new Error(errorData.error || `API error: ${response.status}`);
       }
 
-      const message = await response.json();
+      const data: GenerateResponse = await response.json();
+      const { job, message: placeholderMessage } = data;
 
-      // Replace placeholder with real message
+      // Add placeholder message to state
       setState(s => ({
         ...s,
-        generating: false,
-        generatingPrompt: null,
-        selectedImages: message.x_url ? [message.x_url] : [],
+        currentSession: s.currentSession?.id === sessionId ? {
+          ...s.currentSession,
+          messages: [...(s.currentSession.messages || []), {
+            ...placeholderMessage,
+            status: 'pending' as const,
+            _params: params,
+          }],
+        } : s.currentSession,
         debugInfo: {
           ...s.debugInfo,
-          [message.id]: {
+          [job.id]: {
             payload,
             endpoint: `/api/sessions/${sessionId}/generate`,
             timestamp: new Date().toISOString(),
           },
         },
-        currentSession: s.currentSession ? {
-          ...s.currentSession,
-          current_x_url: message.x_url,
-          messages: (s.currentSession.messages || []).map(m =>
-            m.id === placeholderId ? { ...message, status: 'success' as const, _params: params } : m
-          ),
-        } : null,
       }));
 
-      return message;
+      // Start polling for job completion
+      pollJob(job.id, sessionId, params);
+
+      return job;
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : 'Generation failed';
-      // Update placeholder to failed state
       setState(s => ({
         ...s,
         generating: false,
         generatingPrompt: null,
-        currentSession: s.currentSession ? {
-          ...s.currentSession,
-          messages: (s.currentSession.messages || []).map(m =>
-            m.id === placeholderId ? { ...m, status: 'failed' as const, error: errorMessage } : m
-          ),
-        } : null,
+        error: errorMessage,
       }));
       return null;
     }
-  }, []);
+  }, [pollJob]);
 
   const generateImage = useCallback(async (prompt: string, mode: 'new' | 'edit' = 'new', currentSelectedImages?: string[]) => {
     // Get settings at call time to avoid stale closures
     const currentSettings = getSettings();
 
-    if (!currentSettings.hasApiKey) {
-      setState(s => ({ ...s, error: 'API key required. Configure in settings.' }));
+    // Check API key only for models that require it (Radio models)
+    if (modelRequiresApiKey(currentSettings.model) && !currentSettings.hasApiKey) {
+      setState(s => ({ ...s, error: 'API key required for Radio models. Configure in settings or use a Cloudflare model.' }));
       return null;
     }
 
@@ -232,9 +435,15 @@ export function useSession(getSettings: () => Settings) {
     }
 
     // Store generation params for retry
-    // Note: Only flux models support editing, zimage-turbo doesn't
+    // For Radio models: only flux models support editing, zimage-turbo doesn't
+    // For CF models: all flux models support editing
+    let modelToUse = currentSettings.model;
+    if (isEdit && modelToUse === 'zimage-turbo') {
+      modelToUse = 'flux2klein'; // Fall back to flux for editing with Radio
+    }
+
     const params: Message['_params'] = {
-      model: isEdit ? (currentSettings.model.startsWith('flux') ? currentSettings.model : 'flux2klein') : currentSettings.model,
+      model: modelToUse,
       width: currentSettings.width,
       height: currentSettings.height,
       steps: isEdit ? 4 : currentSettings.steps,
@@ -243,36 +452,17 @@ export function useSession(getSettings: () => Settings) {
       images: isEdit ? [...selectedImagesNow] : [],
     };
 
-    // Create placeholder message immediately
-    const placeholderId = `pending-${Date.now()}`;
-    const placeholder: Message = {
-      id: placeholderId,
-      prompt,
-      image_path: null,
-      x_url: null,
-      is_edit: isEdit ? 1 : 0,
-      generation_time_ms: null,
-      archived: 0,
-      created_at: new Date().toISOString(),
-      status: 'pending',
-      _params: params,
-    };
-
     const sessionId = state.currentSession.id;
 
-    // Add placeholder to messages and start generating
+    // Set generating state
     setState(s => ({
       ...s,
       generating: true,
       generatingPrompt: prompt,
       error: null,
-      currentSession: s.currentSession ? {
-        ...s.currentSession,
-        messages: [...(s.currentSession.messages || []), placeholder],
-      } : null,
     }));
 
-    return executeGeneration(placeholderId, prompt, params, isEdit, sessionId);
+    return executeGeneration(prompt, params, isEdit, sessionId);
   }, [getSettings, state.currentSession, state.selectedImages, executeGeneration]);
 
   const retryMessage = useCallback(async (messageId: string) => {
@@ -284,43 +474,24 @@ export function useSession(getSettings: () => Settings) {
       return null;
     }
 
-    if (!getSettings().hasApiKey) {
-      setState(s => ({ ...s, error: 'API key required. Configure in settings.' }));
+    // Check API key only for models that require it (Radio models)
+    if (modelRequiresApiKey(message._params.model) && !getSettings().hasApiKey) {
+      setState(s => ({ ...s, error: 'API key required for Radio models. Configure in settings.' }));
       return null;
     }
 
     const isEdit = message.is_edit === 1;
-
-    // Create new placeholder for retry
-    const placeholderId = `pending-${Date.now()}`;
-    const placeholder: Message = {
-      id: placeholderId,
-      prompt: message.prompt,
-      image_path: null,
-      x_url: null,
-      is_edit: message.is_edit,
-      generation_time_ms: null,
-      archived: 0,
-      created_at: new Date().toISOString(),
-      status: 'pending',
-      _params: message._params,
-    };
-
     const sessionId = state.currentSession.id;
 
-    // Add new placeholder after the original message
+    // Set generating state
     setState(s => ({
       ...s,
       generating: true,
       generatingPrompt: message.prompt,
       error: null,
-      currentSession: s.currentSession ? {
-        ...s.currentSession,
-        messages: [...(s.currentSession.messages || []), placeholder],
-      } : null,
     }));
 
-    return executeGeneration(placeholderId, message.prompt, message._params, isEdit, sessionId);
+    return executeGeneration(message.prompt, message._params, isEdit, sessionId);
   }, [state.currentSession, getSettings, executeGeneration]);
 
   const dismissFailedMessage = useCallback((messageId: string) => {
@@ -336,9 +507,9 @@ export function useSession(getSettings: () => Settings) {
   const deleteMessage = useCallback(async (messageId: string) => {
     if (!state.currentSession) return;
 
-    // Find the message to get its x_url for selection cleanup
+    // Find the message to get its image_path for selection cleanup
     const message = state.currentSession.messages?.find(m => m.id === messageId);
-    const xUrl = message?.x_url;
+    const imagePath = message?.image_path;
 
     try {
       const response = await fetch(`/api/sessions/${state.currentSession.id}/messages/${messageId}`, {
@@ -349,7 +520,7 @@ export function useSession(getSettings: () => Settings) {
         setState(s => ({
           ...s,
           // Remove from selected images if it was selected
-          selectedImages: xUrl ? s.selectedImages.filter(url => url !== xUrl) : s.selectedImages,
+          selectedImages: imagePath ? s.selectedImages.filter(p => p !== imagePath) : s.selectedImages,
           currentSession: s.currentSession ? {
             ...s.currentSession,
             messages: (s.currentSession.messages || []).filter(m => m.id !== messageId),
@@ -399,11 +570,11 @@ export function useSession(getSettings: () => Settings) {
   }, []);
 
   const branchFrom = useCallback((message: Message) => {
-    if (!message.x_url) return;
+    if (!message.image_path) return;
     // Set this image as the only selected image for editing
     setState(s => ({
       ...s,
-      selectedImages: [message.x_url!],
+      selectedImages: [message.image_path!],
     }));
   }, []);
 
@@ -456,6 +627,75 @@ export function useSession(getSettings: () => Settings) {
     }
   }, [state.currentSession]);
 
+  const uploadImage = useCallback(async (file: File) => {
+    if (!state.currentSession) {
+      setState(s => ({ ...s, error: 'No session selected' }));
+      return null;
+    }
+
+    // Validate file type
+    if (!file.type.match(/^image\/(png|jpeg|webp)$/)) {
+      setState(s => ({ ...s, error: 'Invalid file type. Use PNG, JPEG, or WebP.' }));
+      return null;
+    }
+
+    // Validate file size (10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      setState(s => ({ ...s, error: 'Image too large (max 10MB)' }));
+      return null;
+    }
+
+    setState(s => ({ ...s, error: null }));
+
+    try {
+      // Convert file to base64
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          // Remove data URL prefix (e.g., "data:image/png;base64,")
+          const base64Data = result.split(',')[1];
+          resolve(base64Data);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      // Upload to server
+      const response = await fetch(`/api/sessions/${state.currentSession.id}/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64: base64,
+          filename: file.name,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Upload failed' })) as { error?: string };
+        throw new Error(errorData.error || `Upload failed: ${response.status}`);
+      }
+
+      const message: Message = await response.json();
+
+      // Add message to session and auto-select for editing
+      setState(s => ({
+        ...s,
+        currentSession: s.currentSession ? {
+          ...s.currentSession,
+          messages: [...(s.currentSession.messages || []), message],
+        } : null,
+        selectedImages: [message.image_path!], // Auto-select uploaded image
+      }));
+
+      return message;
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : 'Upload failed';
+      setState(s => ({ ...s, error: errorMessage }));
+      return null;
+    }
+  }, [state.currentSession]);
+
   return {
     ...state,
     fetchSessions,
@@ -472,6 +712,7 @@ export function useSession(getSettings: () => Settings) {
     branchFrom,
     renameSession,
     archiveSession,
+    uploadImage,
     clearError: () => setState(s => ({ ...s, error: null })),
   };
 }

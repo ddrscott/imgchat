@@ -157,6 +157,7 @@ function App() {
             onRetry={session.retryMessage}
             onDismiss={session.dismissFailedMessage}
             onDelete={session.deleteMessage}
+            onUpload={session.uploadImage}
           />
         </section>
       </main>

@@ -1,10 +1,34 @@
 import type { Settings } from '../hooks/useSettings';
+import { MODELS, getModelInfo } from '../models';
 
 interface SettingsPanelProps {
   settings: Settings;
   onUpdate: (updates: Partial<Settings>) => void;
   onClose: () => void;
 }
+
+// Radio tower icon for Radio TTS models (Lucide)
+const RadioIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" class="provider-icon">
+    <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9" />
+    <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5" />
+    <circle cx="12" cy="12" r="2" />
+    <path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5" />
+    <path d="M19.1 4.9C23 8.8 23 15.1 19.1 19" />
+  </svg>
+);
+
+// Cloud icon for Cloudflare models (Lucide)
+const CloudIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" class="provider-icon">
+    <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+  </svg>
+);
+
+// Provider icon component
+const ProviderIcon = ({ type }: { type: 'radio' | 'cloud' }) => {
+  return type === 'cloud' ? <CloudIcon /> : <RadioIcon />;
+};
 
 export function SettingsPanel({ settings, onUpdate, onClose }: SettingsPanelProps) {
   return (
@@ -31,14 +55,31 @@ export function SettingsPanel({ settings, onUpdate, onClose }: SettingsPanelProp
 
           <div class="setting-group">
             <label>Model</label>
-            <select
-              value={settings.model}
-              onChange={(e) => onUpdate({ model: (e.target as HTMLSelectElement).value as Settings['model'] })}
-            >
-              <option value="flux2klein">flux2klein</option>
-              <option value="flux2klein-9b">flux2klein-9b</option>
-              <option value="zimage-turbo">zimage-turbo</option>
-            </select>
+            <div class="model-select-wrapper">
+              <span class="model-provider-icon">
+                <ProviderIcon type={getModelInfo(settings.model)?.providerIcon || 'radio'} />
+              </span>
+              <select
+                value={settings.model}
+                onChange={(e) => onUpdate({ model: (e.target as HTMLSelectElement).value as Settings['model'] })}
+              >
+                <optgroup label="☁️ Cloudflare Workers AI">
+                  {MODELS.filter(m => m.provider === 'cloudflare').map(m => (
+                    <option key={m.id} value={m.id}>{m.name}</option>
+                  ))}
+                </optgroup>
+                <optgroup label="📡 Radio TTS (API Key)">
+                  {MODELS.filter(m => m.provider === 'radio').map(m => (
+                    <option key={m.id} value={m.id}>{m.name}</option>
+                  ))}
+                </optgroup>
+              </select>
+            </div>
+            <span class="setting-hint">
+              {getModelInfo(settings.model)?.requiresApiKey
+                ? 'Requires TTS API key'
+                : 'Uses Cloudflare Workers AI (no API key)'}
+            </span>
           </div>
 
           <div class="setting-group">

@@ -1,0 +1,6 @@
+name = "imgchat-model-test"
+main = "test-models.ts"
+compatibility_date = "2024-11-01"
+
+[ai]
+binding = "AI"

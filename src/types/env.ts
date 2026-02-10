@@ -1,12 +1,24 @@
 export interface Env {
   DB: D1Database;
   IMAGES: R2Bucket;
+  AI: Ai;
   JWT_SECRET: string;
   ENVIRONMENT: string;
 }
 
+import type { ModelId } from '../providers/registry';
+
+// All supported model IDs
+export type SupportedModel =
+  | 'flux2klein'
+  | 'flux2klein-9b'
+  | 'zimage-turbo'
+  | 'cf-flux-klein-4b'
+  | 'cf-flux-klein-9b'
+  | 'cf-flux-dev';
+
 export interface SessionSettings {
-  model: 'flux2klein' | 'flux2klein-9b' | 'zimage-turbo';
+  model: SupportedModel;
   width: number;
   height: number;
   steps: number;
